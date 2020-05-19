@@ -1,13 +1,8 @@
 #include <stdio.h>
+#include <liblog/log.h>
 
 int main (int argc, char *argv[])
 {
-  if (argc < 2)
-  {
-    fprintf (stderr, "error: missing name\n");
-    return 1;
-  }
-
-  printf ("Hello, %s!\n", argv[1]);
-  return 0;
+    log_set_level(LOG_TRACE);
+    log_trace("Tracer!");
 }
