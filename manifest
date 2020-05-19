@@ -1,0 +1,11 @@
+: 1
+name: coin-seeder
+version: 0.1.0-a.0.z
+summary: coin-seeder C executable
+license: proprietary
+description-file: README.md
+url: https://example.org/coin-seeder
+email: chapman.shoop@gmail.com
+depends: * build2 >= 0.12.0
+depends: * bpkg >= 0.12.0
+#depends: libhello ^1.0.0
