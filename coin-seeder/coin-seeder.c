@@ -32,7 +32,7 @@ char *SEED_VERSION = NULL;
 typedef struct coin_node {
     struct sockaddr address;
     int last_contact;
-    struct coin_node* next;
+    struct coin_node *next;
 } coin_node_s;
 
 pthread_mutex_t GOOD_MUTEX;
@@ -146,6 +146,7 @@ void handle_control_c(int _) {
 int main (int argc, char *argv[])
 {
 // What's next? Get the handshake to work, that'd be a good one.
+// Also, some data structures :D http://troydhanson.github.io/uthash/userguide.html
     log_set_level(LOG_TRACE);
 
     struct sigaction act = {.sa_handler=handle_control_c};
