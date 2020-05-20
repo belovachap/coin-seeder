@@ -1,6 +1,7 @@
-libs =
-import libs += liblog%lib{log}
+import libs = liblog%lib{log}
+# import libs += libhello%lib{hello}
 
 exe{coin-seeder}: {h c}{**} $libs testscript
 
 c.poptions =+ "-I$out_root" "-I$src_root"
+c.coptions =+ "-pthread"
