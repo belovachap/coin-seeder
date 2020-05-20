@@ -4,6 +4,9 @@
 #include <pthread.h>
 #include <unistd.h>
 
+#include <signal.h>
+#include <stdlib.h>
+
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netdb.h>
@@ -83,8 +86,8 @@ int connect_to_seed_node() {
 }
 
 
-void *seed_thread(void *vin) {
-    log_trace("Entering seed_node_thread()");
+void *seed_thread() {
+    log_trace("Entering seed_thread()");
 
     while(!QUIT) {
         // Need to make a tcp connection
@@ -104,35 +107,49 @@ void *seed_thread(void *vin) {
         // Use this to populate a queue (linked list?)
         close(tcp_socket);
 
-        QUIT = true;
+        // Sleep for around 10 minutes (600 seconds)
+        for(int i = 0; i < 600; i++) {
+            if(QUIT) {
+                break;
+            }
+            sleep(1);
+        }
     }
 
-    log_trace("Exiting seed_node_thread()");
+    log_trace("Exiting seed_thread()");
     return NULL;
 }
 
 
 void *dns_thread() {
-    log_trace("Entering dns_server_thread()");
+    log_trace("Entering dns_thread()");
 
     while(!QUIT) {
         // Need to listen for incoming UDP requests and respond appropriately...
-        log_info("I AM DNS THREAD LOL");
+        log_info("I AM DNS THREAD LOL, I sleep now.");
+        sleep(1);
     }
 
-    log_trace("Exiting dns_server_thread()");
+    log_trace("Exiting dns_thread()");
     return NULL;
 }
 
 
-// Two ideas, then move on to C++
-// One: capture ctrl-c and shutdown gracefully
-// Two: get the handshake to work?
+void handle_control_c(int _) {
+    log_trace("Entering handle_control_c()");
+    log_info("Shutting down...");
+    QUIT = true;
+    log_trace("Exiting handle_control_c()");
+}
 
 
 int main (int argc, char *argv[])
 {
+// What's next? Get the handshake to work, that'd be a good one.
     log_set_level(LOG_TRACE);
+
+    struct sigaction act = {.sa_handler=handle_control_c};
+    sigaction(SIGINT, &act, NULL);
 
     pthread_t seed, dns;
     pthread_create(&seed, NULL, &seed_thread, NULL);
