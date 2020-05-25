@@ -1,5 +1,6 @@
-import libs = liblog%lib{log}
-# import libs += libhello%lib{hello}
+libs = # dependencies
+import libs += libcoin-seeder%lib{coin-seeder}
+import libs += liblog%lib{log}
 
 exe{coin-seeder}: {h c}{**} $libs testscript
 
