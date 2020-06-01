@@ -1,25 +1,9 @@
+#include <netdb.h>
+#include <pthread.h>
+#include <signal.h>
+
 #include <libcoin-seeder/coin-seeder.h>
 #include <liblog/log.h>
-#include <stdbool.h>
-#include <stdio.h>
-#include <pthread.h>
-#include <unistd.h>
-
-#include <signal.h>
-#include <stdlib.h>
-
-#include <sys/types.h>
-#include <sys/socket.h>
-#include <netdb.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <unistd.h>
-#include <string.h>
-
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-
 
 bool QUIT = false;
 
@@ -31,7 +15,7 @@ int SEED_HEIGHT = 0;
 char *SEED_VERSION = NULL;
 
 typedef struct coin_node {
-    struct sockaddr address;
+    struct sockaddr *addr;
     int last_contact;
     struct coin_node *next;
 } coin_node_s;
@@ -42,9 +26,26 @@ coin_node_s *GOOD_NODES = NULL;
 pthread_mutex_t CHECK_MUTEX;
 coin_node_s *CHECK_NODES = NULL;
 
+typedef struct connected_node {
+    socketfd s;
+    struct sockaddr *addr;
+} connected_node_s;
 
-int connect_to_seed_node() {
-    log_trace("connect_to_seed_node()");
+connected_node_s new_connected_node(socketfd s, struct addrinfo *info) {
+    connected_node_s connected_node = {.s=s};
+    connected_node.addr = malloc(sizeof(struct sockaddr));
+    memcpy(connected_node.addr, info->ai_addr, sizeof(struct sockaddr));
+
+    return connected_node;
+}
+
+void free_connected_node(connected_node_s connected_node) {
+    close(connected_node.s);
+    free(connected_node.addr);
+}
+
+connected_node_s connect_to_seed_node() {
+    log_trace("Entering connect_to_seed_node()");
 
     struct addrinfo hints;
     memset(&hints, 0, sizeof(struct addrinfo));
@@ -55,20 +56,20 @@ int connect_to_seed_node() {
     int error_number = getaddrinfo(SEED_NODE, SEED_PORT, &hints, &result);
     if (error_number != 0) {
         log_error("getaddrinfo(): %s\n", gai_strerror(error_number));
-        return -1;
+        return (connected_node_s){.s=-1};
     }
 
-    int socket_number;
+    socketfd s;
     struct addrinfo *info;
     for (info = result; info != NULL; info = info->ai_next) {
-        socket_number = socket(info->ai_family, info->ai_socktype, info->ai_protocol);
-        if (socket_number == -1) {
+        s = socket(info->ai_family, info->ai_socktype, info->ai_protocol);
+        if (s == -1) {
             continue;
         }
 
         log_debug("Trying IP address: %s", inet_ntoa(((struct sockaddr_in *) info->ai_addr)->sin_addr));
-        if (connect(socket_number, info->ai_addr, info->ai_addrlen) == -1) {
-            close(socket_number);
+        if (connect(s, info->ai_addr, info->ai_addrlen) == -1) {
+            close(s);
             continue;
         }
 
@@ -78,12 +79,87 @@ int connect_to_seed_node() {
     if (info == NULL) {
         log_error("Could not connect.\n");
         freeaddrinfo(result);
-        return -1;
+        return (connected_node_s){.s=-1};
     }
 
-    log_debug("Connected to IP address: %s", inet_ntoa(((struct sockaddr_in *) info->ai_addr)->sin_addr));
+    connected_node_s connected_node = new_connected_node(s, info);
     freeaddrinfo(result);
-    return socket_number;
+
+    log_debug(
+        "Connected to IP address: %s",
+        inet_ntoa(((struct sockaddr_in *) connected_node.addr)->sin_addr)
+    );
+    log_trace("Exiting connect_to_seed_node()");
+    return connected_node;
+}
+
+void write_version_message(socketfd s, struct sockaddr to, struct sockaddr from) {
+    log_trace("Entering write_version_message()");
+
+    uint32_t now = time(NULL);
+    log_debug("now -> %u", now);
+    char *addr;
+    char *ip;
+    addr = inet_ntoa(((struct sockaddr_in *)&to)->sin_addr);
+    log_debug("to addr -> %s", addr);
+    ip = address_to_ip(addr);
+    net_addr_s addr_recv = new_net_addr(now, 1, ip, false);
+    free(ip);
+
+    addr = inet_ntoa(((struct sockaddr_in *)&from)->sin_addr);
+    log_debug("from addr -> %s", addr);
+    ip = address_to_ip(addr);
+    net_addr_s addr_from = new_net_addr(now, 0, ip, false);
+    free(ip);
+
+    log_debug("making version_payload bytes");
+    char *str = heap_string("coin-seeder");
+    var_str_s user_agent = new_var_str(str);
+    version_payload_s version_payload = new_version_payload(addr_recv, addr_from, user_agent);
+    bytes_s bytes = serialize_version_payload(version_payload);
+    free_version_payload(version_payload);
+
+    log_debug("maing new_message");
+    message_s message = new_message("version", bytes);
+    write_message(s, message);
+    free_message(message);
+
+    log_trace("Exiting write_version_message()");
+}
+
+parsed_version_payload_s read_version_message(socketfd s) {
+    log_trace("Entering read_version_message()");
+
+    parsed_message_s parsed_message = read_message(s);
+    if(parsed_message.parsed_bytes <= 0) {
+        log_error("Failed to read_message.");
+        log_trace("Exiting read_version_message()");
+        return (parsed_version_payload_s){.parsed_bytes=-1};
+    }
+
+    if(strcmp(parsed_message.message.command, "version") != 0) {
+        log_error("Message command was not \"version\".");
+        log_trace("Exiting read_version_message()");
+        return (parsed_version_payload_s){.parsed_bytes=-1};
+    }
+
+    log_trace("Exiting read_version_message()");
+    bytes_s payload = {
+        .length=parsed_message.message.length,
+        .buffer=parsed_message.message.payload,
+    };
+    return parse_version_payload(payload);
+}
+
+void write_verack_message(socketfd s) {
+    log_trace("Entering write_verack_message()");
+
+    bytes_s empty = {.length=0, .buffer=NULL};
+    message_s message = new_message("verack", empty);
+    write_message(s, message);
+    free_message(message);
+
+    log_trace("Exiting write_verack_message()");
 }
 
 void *seed_thread() {
@@ -91,40 +167,44 @@ void *seed_thread() {
 
     while(!QUIT) {
         // Need to make a tcp connection
-        const socketfd s = connect_to_seed_node();
-        log_debug("Connected to SEED_NODE on socket: %d", s);
+        connected_node_s connected_node = connect_to_seed_node();
+        if(connected_node.s <= 0) {
+            log_warn("Failed to connect_to_seed_node()");
+        }
+        else {
+            log_debug("Connected to SEED_NODE");
 
-        // Maybe hints on reading / writing to the socket! https://www.geeksforgeeks.org/socket-programming-cc/
+            struct sockaddr from;
+            memset(&from, 0, sizeof(struct sockaddr));
+            write_version_message(connected_node.s, *connected_node.addr, from);
 
-        // Need to send some messages
-        // Hand shake
-        // Send version
-        write_version_message(s);
-        read_verack_message(s);
-        read_version_message(s);
+            parsed_version_payload_s parsed = read_version_message(connected_node.s);
 
-        // Need to get block chain height, user agent, version, etc.
+            write_verack_message(connected_node.s);
 
-        // Use this info to judge other nodes :)
+            // Need to get block chain height, user agent, version, etc.
 
-        // Need to get peer addresses
+            // Use this info to judge other nodes :)
 
-        // Use this to populate a queue (linked list?)
-        close(s);
+            // Need to get peer addresses
+        }
 
-        // Sleep for around 10 minutes (600 seconds)
+        free_connected_node(connected_node);
+
+        // Sleep for 10 minutes (600 seconds)
+        log_debug("Sleeping seed_thread() for 10 minutes");
         for(int i = 0; i < 600; i++) {
             if(QUIT) {
                 break;
             }
             sleep(1);
         }
+        log_debug("Waking seed_thread()");
     }
 
     log_trace("Exiting seed_thread()");
     return NULL;
 }
-
 
 void *dns_thread() {
     log_trace("Entering dns_thread()");
@@ -138,7 +218,6 @@ void *dns_thread() {
     return NULL;
 }
 
-
 void handle_control_c(int _) {
     log_trace("Entering handle_control_c()");
     log_info("Shutting down");
@@ -146,11 +225,8 @@ void handle_control_c(int _) {
     log_trace("Exiting handle_control_c()");
 }
 
-
 int main (int argc, char *argv[])
 {
-// What's next? Get the handshake to work, that'd be a good one.
-// Also, some data structures :D http://troydhanson.github.io/uthash/userguide.html
     log_set_level(LOG_TRACE);
 
     struct sigaction act = {.sa_handler=handle_control_c};
