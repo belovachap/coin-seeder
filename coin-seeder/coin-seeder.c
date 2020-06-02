@@ -11,11 +11,13 @@ const char *SEED_NODE = "peercoin.peercoin-library.org";
 const char *SEED_PORT = "9901";
 
 pthread_mutex_t SEED_MUTEX;
-int SEED_HEIGHT = 0;
-char *SEED_VERSION = NULL;
+int32_t SEED_HEIGHT = 0;
+int32_t SEED_VERSION = 0;
+uint64_t SEED_SERVICES = 0;
+char *SEED_USER_AGENT = NULL;
 
 typedef struct coin_node {
-    struct sockaddr *addr;
+    char *node;
     int last_contact;
     struct coin_node *next;
 } coin_node_s;
@@ -25,6 +27,10 @@ coin_node_s *GOOD_NODES = NULL;
 
 pthread_mutex_t CHECK_MUTEX;
 coin_node_s *CHECK_NODES = NULL;
+
+void gather_nodes_to_check(socketfd s) {
+
+}
 
 typedef struct connected_node {
     socketfd s;
@@ -143,11 +149,12 @@ parsed_version_payload_s read_version_message(socketfd s) {
         return (parsed_version_payload_s){.parsed_bytes=-1};
     }
 
-    log_trace("Exiting read_version_message()");
     bytes_s payload = {
         .length=parsed_message.message.length,
         .buffer=parsed_message.message.payload,
     };
+
+    log_trace("Exiting read_version_message()");
     return parse_version_payload(payload);
 }
 
@@ -160,6 +167,17 @@ void write_verack_message(socketfd s) {
     free_message(message);
 
     log_trace("Exiting write_verack_message()");
+}
+
+void write_getaddr_message(socketfd s) {
+    log_trace("Entering write_getaddr_message()");
+
+    bytes_s empty = {.length=0, .buffer=NULL};
+    message_s message = new_message("getaddr", empty);
+    write_message(s, message);
+    free_message(message);
+
+    log_trace("Exiting write_getaddr_message()");
 }
 
 void *seed_thread() {
@@ -177,16 +195,71 @@ void *seed_thread() {
             struct sockaddr from;
             memset(&from, 0, sizeof(struct sockaddr));
             write_version_message(connected_node.s, *connected_node.addr, from);
-
             parsed_version_payload_s parsed = read_version_message(connected_node.s);
-
             write_verack_message(connected_node.s);
 
-            // Need to get block chain height, user agent, version, etc.
+            pthread_mutex_lock(&SEED_MUTEX);
+            {
+                SEED_HEIGHT = parsed.version_payload.start_height;
+                log_info("SEED_HEIGHT: %d", SEED_HEIGHT);
+                SEED_VERSION = parsed.version_payload.version;
+                log_info("SEED_VERSION: %d", SEED_VERSION);
+                SEED_SERVICES = parsed.version_payload.services;
+                log_info("SEED_SERVICES: %ld", SEED_SERVICES);
+                free(SEED_USER_AGENT);
+                SEED_USER_AGENT = strdup(parsed.version_payload.user_agent.string);
+                log_info("SEED_USER_AGENT: %s", SEED_USER_AGENT);
+            }
+            pthread_mutex_unlock(&SEED_MUTEX);
 
-            // Use this info to judge other nodes :)
+            write_getaddr_message(connected_node.s);
 
-            // Need to get peer addresses
+            gather_nodes_to_check(connected_node.s);
+
+            int addr_count = 0;
+            while(addr_count < 2) {
+                parsed_message_s parsed = read_message(connected_node.s);
+                if (strcmp(parsed.message.command, "addr") == 0) {
+                    log_debug("got an addr message! need to parse and use it!");
+                    addr_count++;
+                    bytes_s window = {.length=parsed.message.length, .buffer=parsed.message.payload};
+                    parsed_addr_payload_s parsed = parse_addr_payload(window);
+                    log_debug("has %d addresses", parsed.addr_payload.count.value);
+
+                    pthread_mutex_lock(&CHECK_MUTEX);
+                    {
+                        for(int i = 0; i < parsed.addr_payload.count.value; i++) {
+                            net_addr_s net_addr = parsed.addr_payload.addr_list[i];
+                            if(net_addr.port != 9901) {
+                                log_debug("%d) bad port rejected", i);
+                                continue;
+                            }
+
+                            char address[100];
+                            inet_ntop(AF_INET, &net_addr.ip[12], address, 100);
+                            if(strcmp(address, "127.0.0.1") == 0) {
+                                log_debug("%d) %s, bad ip rejected", i, address);
+                                continue;
+                            }
+                            else if (strcmp(address, "0.0.0.0") == 0) {
+                                log_debug("%d) %s, bad ip rejected", i, address);
+                                continue;
+                            }
+
+                            log_debug("%d) %s", i, address);
+                            coin_node_s *n = malloc(sizeof(coin_node_s));
+                            n->node=strdup(address);
+                            n->last_contact = 0;
+                            n->next=CHECK_NODES;
+                            CHECK_NODES = n;
+                        }
+                    }
+                    pthread_mutex_unlock(&CHECK_MUTEX);
+                }
+                else {
+                    log_debug("got a %s message, not sure what to do with. dropping.", parsed.message.command);
+                }
+            }
         }
 
         free_connected_node(connected_node);
@@ -205,6 +278,44 @@ void *seed_thread() {
     log_trace("Exiting seed_thread()");
     return NULL;
 }
+
+void *check_thread() {
+    log_trace("Entering check_thread()");
+
+    while(!QUIT) {
+
+        // Pop a coin_node off the stack.
+        coin_node_s *n = NULL;
+        pthread_mutex_lock(&CHECK_MUTEX);
+        {
+            if(CHECK_NODES) {
+                n = CHECK_NODES;
+                CHECK_NODES = n->next;
+                n->next = NULL;
+            }
+        }
+        pthread_mutex_unlock(&CHECK_MUTEX);
+
+        if(!n) {
+            log_debug("No nodes to check.");
+            sleep(1);
+            continue;
+        }
+
+        log_debug("Checking node: %s...", n->node);
+        // Connect to coin_node, check the version and block height.
+
+        // Add to GOOD_NODES if it passes, free for now.
+        free(n->node);
+        free(n);
+
+        sleep(1);
+    }
+
+    log_trace("Exiting check_thread()");
+    return NULL;
+}
+
 
 void *dns_thread() {
     log_trace("Entering dns_thread()");
@@ -232,17 +343,23 @@ int main (int argc, char *argv[])
     struct sigaction act = {.sa_handler=handle_control_c};
     sigaction(SIGINT, &act, NULL);
 
-    pthread_t seed, dns;
-    log_info("Starting seed thread");
-    pthread_create(&seed, NULL, &seed_thread, NULL);
+    pthread_t check, seed, dns;
+    log_info("Starting check thread");
+    pthread_create(&check, NULL, &check_thread, NULL);
 
     log_info("Starting dns thread");
     pthread_create(&dns, NULL, &dns_thread, NULL);
 
+    log_info("Starting seed thread");
+    pthread_create(&seed, NULL, &seed_thread, NULL);
+
     void *_;
-    pthread_join(seed, &_);
-    log_info("Seed thread rejoined the main thread");
+    pthread_join(check, &_);
+    log_info("Check thread rejoined the main thread");
 
     pthread_join(dns, &_);
     log_info("Dns thread rejoined the main thread");
+
+    pthread_join(seed, &_);
+    log_info("Seed thread rejoined the main thread");
 }
