@@ -3,6 +3,7 @@
 #include <signal.h>
 
 #include <libcoin-seeder/coin-seeder.h>
+#include <libdns/dns.h>
 #include <liblog/log.h>
 
 bool QUIT = false;
@@ -14,6 +15,7 @@ pthread_mutex_t SEED_MUTEX;
 int32_t SEED_HEIGHT = 0;
 int32_t SEED_VERSION = 0;
 uint64_t SEED_SERVICES = 0;
+char *SEED_ADDRESS = NULL;
 char *SEED_USER_AGENT = NULL;
 
 typedef struct coin_node {
@@ -30,73 +32,6 @@ coin_node_s *CHECK_NODES = NULL;
 
 void gather_nodes_to_check(socketfd s) {
 
-}
-
-typedef struct connected_node {
-    socketfd s;
-    struct sockaddr *addr;
-} connected_node_s;
-
-connected_node_s new_connected_node(socketfd s, struct addrinfo *info) {
-    connected_node_s connected_node = {.s=s};
-    connected_node.addr = malloc(sizeof(struct sockaddr));
-    memcpy(connected_node.addr, info->ai_addr, sizeof(struct sockaddr));
-
-    return connected_node;
-}
-
-void free_connected_node(connected_node_s connected_node) {
-    close(connected_node.s);
-    free(connected_node.addr);
-}
-
-connected_node_s connect_to_seed_node() {
-    log_trace("Entering connect_to_seed_node()");
-
-    struct addrinfo hints;
-    memset(&hints, 0, sizeof(struct addrinfo));
-    hints.ai_family = AF_INET;
-    hints.ai_socktype = SOCK_STREAM;
-
-    struct addrinfo *result;
-    int error_number = getaddrinfo(SEED_NODE, SEED_PORT, &hints, &result);
-    if (error_number != 0) {
-        log_error("getaddrinfo(): %s\n", gai_strerror(error_number));
-        return (connected_node_s){.s=-1};
-    }
-
-    socketfd s;
-    struct addrinfo *info;
-    for (info = result; info != NULL; info = info->ai_next) {
-        s = socket(info->ai_family, info->ai_socktype, info->ai_protocol);
-        if (s == -1) {
-            continue;
-        }
-
-        log_debug("Trying IP address: %s", inet_ntoa(((struct sockaddr_in *) info->ai_addr)->sin_addr));
-        if (connect(s, info->ai_addr, info->ai_addrlen) == -1) {
-            close(s);
-            continue;
-        }
-
-        break; // Connection established!
-    }
-
-    if (info == NULL) {
-        log_error("Could not connect.\n");
-        freeaddrinfo(result);
-        return (connected_node_s){.s=-1};
-    }
-
-    connected_node_s connected_node = new_connected_node(s, info);
-    freeaddrinfo(result);
-
-    log_debug(
-        "Connected to IP address: %s",
-        inet_ntoa(((struct sockaddr_in *) connected_node.addr)->sin_addr)
-    );
-    log_trace("Exiting connect_to_seed_node()");
-    return connected_node;
 }
 
 void write_version_message(socketfd s, struct sockaddr to, struct sockaddr from) {
@@ -169,6 +104,83 @@ void write_verack_message(socketfd s) {
     log_trace("Exiting write_verack_message()");
 }
 
+typedef struct connected_node {
+    socketfd s;
+    struct sockaddr *addr;
+    version_payload_s version_payload;
+} connected_node_s;
+
+connected_node_s new_connected_node(socketfd s, struct addrinfo *info) {
+    connected_node_s connected_node = {.s=s};
+    connected_node.addr = malloc(sizeof(struct sockaddr));
+    memcpy(connected_node.addr, info->ai_addr, sizeof(struct sockaddr));
+
+    return connected_node;
+}
+
+void free_connected_node(connected_node_s connected_node) {
+    close(connected_node.s);
+    free_version_payload(connected_node.version_payload);
+    free(connected_node.addr);
+}
+
+connected_node_s connect_to_node(const char *node) {
+    log_trace("Entering connect_to_node()");
+
+    struct addrinfo hints;
+    memset(&hints, 0, sizeof(struct addrinfo));
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+
+    struct addrinfo *result;
+    int error_number = getaddrinfo(SEED_NODE, SEED_PORT, &hints, &result);
+    if (error_number != 0) {
+        log_error("getaddrinfo(): %s\n", gai_strerror(error_number));
+        return (connected_node_s){.s=-1};
+    }
+
+    socketfd s;
+    struct addrinfo *info;
+    for (info = result; info != NULL; info = info->ai_next) {
+        s = socket(info->ai_family, info->ai_socktype, info->ai_protocol);
+        if (s == -1) {
+            continue;
+        }
+
+        log_debug("Trying IP address: %s", inet_ntoa(((struct sockaddr_in *) info->ai_addr)->sin_addr));
+        if (connect(s, info->ai_addr, info->ai_addrlen) == -1) {
+            close(s);
+            continue;
+        }
+
+        break; // Connection established!
+    }
+
+    if (info == NULL) {
+        log_error("Could not connect.\n");
+        freeaddrinfo(result);
+        return (connected_node_s){.s=-1};
+    }
+
+    connected_node_s connected_node = new_connected_node(s, info);
+    freeaddrinfo(result);
+
+    log_debug(
+        "Connected to IP address: %s",
+        inet_ntoa(((struct sockaddr_in *) connected_node.addr)->sin_addr)
+    );
+
+    struct sockaddr from;
+    memset(&from, 0, sizeof(struct sockaddr));
+    write_version_message(connected_node.s, *connected_node.addr, from);
+    parsed_version_payload_s parsed = read_version_message(connected_node.s);
+    write_verack_message(connected_node.s);
+    connected_node.version_payload = parsed.version_payload;
+
+    log_trace("Exiting connect_to_node()");
+    return connected_node;
+}
+
 void write_getaddr_message(socketfd s) {
     log_trace("Entering write_getaddr_message()");
 
@@ -185,29 +197,23 @@ void *seed_thread() {
 
     while(!QUIT) {
         // Need to make a tcp connection
-        connected_node_s connected_node = connect_to_seed_node();
+        connected_node_s connected_node = connect_to_node(SEED_NODE);
         if(connected_node.s <= 0) {
-            log_warn("Failed to connect_to_seed_node()");
+            log_warn("Failed to connect_to_node()");
         }
         else {
             log_debug("Connected to SEED_NODE");
 
-            struct sockaddr from;
-            memset(&from, 0, sizeof(struct sockaddr));
-            write_version_message(connected_node.s, *connected_node.addr, from);
-            parsed_version_payload_s parsed = read_version_message(connected_node.s);
-            write_verack_message(connected_node.s);
-
             pthread_mutex_lock(&SEED_MUTEX);
             {
-                SEED_HEIGHT = parsed.version_payload.start_height;
+                SEED_HEIGHT = connected_node.version_payload.start_height;
                 log_info("SEED_HEIGHT: %d", SEED_HEIGHT);
-                SEED_VERSION = parsed.version_payload.version;
+                SEED_VERSION = connected_node.version_payload.version;
                 log_info("SEED_VERSION: %d", SEED_VERSION);
-                SEED_SERVICES = parsed.version_payload.services;
+                SEED_SERVICES = connected_node.version_payload.services;
                 log_info("SEED_SERVICES: %ld", SEED_SERVICES);
                 free(SEED_USER_AGENT);
-                SEED_USER_AGENT = strdup(parsed.version_payload.user_agent.string);
+                SEED_USER_AGENT = strdup(connected_node.version_payload.user_agent.string);
                 log_info("SEED_USER_AGENT: %s", SEED_USER_AGENT);
             }
             pthread_mutex_unlock(&SEED_MUTEX);
@@ -216,6 +222,8 @@ void *seed_thread() {
 
             gather_nodes_to_check(connected_node.s);
 
+            char *seed_address = inet_ntoa(((struct sockaddr_in *) connected_node.addr)->sin_addr);
+            log_debug("seed ip: %s", seed_address);
             int addr_count = 0;
             while(addr_count < 2) {
                 parsed_message_s parsed = read_message(connected_node.s);
@@ -243,6 +251,10 @@ void *seed_thread() {
                             }
                             else if (strcmp(address, "0.0.0.0") == 0) {
                                 log_debug("%d) %s, bad ip rejected", i, address);
+                                continue;
+                            }
+                            else if (strcmp(address, seed_address) == 0) {
+                                log_debug("%d) %s, don't add seed node", i, address);
                                 continue;
                             }
 
@@ -304,12 +316,27 @@ void *check_thread() {
 
         log_debug("Checking node: %s...", n->node);
         // Connect to coin_node, check the version and block height.
-
-        // Add to GOOD_NODES if it passes, free for now.
+        connected_node_s conn = connect_to_node(n->node);
         free(n->node);
         free(n);
 
-        sleep(1);
+        if(conn.s != -1) {
+            log_debug("Connection to node failed.");
+            continue;
+        }
+
+        // Add to GOOD_NODES if it passes, free for now.
+        if(conn.version_payload.start_height < SEED_HEIGHT) {
+            log_debug("Too few blocks.");
+            continue;
+        }
+
+        if(strcmp(conn.version_payload.user_agent.string, SEED_USER_AGENT) != 0) {
+            log_debug("User agent doesn't match.");
+            continue;
+        }
+
+        log_debug("Looks good!");
     }
 
     log_trace("Exiting check_thread()");

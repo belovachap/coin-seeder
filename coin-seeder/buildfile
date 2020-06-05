@@ -1,5 +1,6 @@
 libs = # dependencies
 import libs += libcoin-seeder%lib{coin-seeder}
+import libs += libdns%lib{dns}
 import libs += liblog%lib{log}
 
 exe{coin-seeder}: {h c}{**} $libs testscript
