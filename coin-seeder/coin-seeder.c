@@ -2,6 +2,13 @@
 #include <pthread.h>
 #include <signal.h>
 
+#include <errno.h>
+#include <fcntl.h>
+#include <stdlib.h>
+#include <sys/select.h>
+#include <sys/socket.h>
+#include <sys/time.h>
+
 #include <libcoin-seeder/coin-seeder.h>
 #include <libdns/dns.h>
 #include <liblog/log.h>
@@ -133,23 +140,58 @@ connected_node_s connect_to_node(const char *node) {
     hints.ai_socktype = SOCK_STREAM;
 
     struct addrinfo *result;
-    int error_number = getaddrinfo(SEED_NODE, SEED_PORT, &hints, &result);
+    int error_number = getaddrinfo(node, SEED_PORT, &hints, &result);
     if (error_number != 0) {
         log_error("getaddrinfo(): %s\n", gai_strerror(error_number));
         return (connected_node_s){.s=-1};
     }
 
+    struct timeval timeout = {.tv_sec=5, .tv_usec=0};
     socketfd s;
     struct addrinfo *info;
     for (info = result; info != NULL; info = info->ai_next) {
+        log_debug("Trying IP address: %s", inet_ntoa(((struct sockaddr_in *) info->ai_addr)->sin_addr));
+
         s = socket(info->ai_family, info->ai_socktype, info->ai_protocol);
         if (s == -1) {
             continue;
         }
 
-        log_debug("Trying IP address: %s", inet_ntoa(((struct sockaddr_in *) info->ai_addr)->sin_addr));
-        if (connect(s, info->ai_addr, info->ai_addrlen) == -1) {
-            close(s);
+        int res, opt;
+
+        // get socket flags
+        if ((opt = fcntl(s, F_GETFL, NULL)) < 0) {
+            continue;
+        }
+
+        // set socket non-blocking
+        if (fcntl (s, F_SETFL, opt | O_NONBLOCK) < 0) {
+            continue;
+        }
+
+        if ((res = connect(s, info->ai_addr, info->ai_addrlen)) < 0) {
+            if (errno == EINPROGRESS) {
+                fd_set wait_set;
+
+                // make file descriptor set with socket
+                FD_ZERO(&wait_set);
+                FD_SET (s, &wait_set);
+
+                // wait for socket to be writable; return after given timeout
+                res = select(s + 1, NULL, &wait_set, NULL, &timeout);
+            }
+        }
+        else {
+            res = 1; // connection was successful immediately
+        }
+
+        // reset socket flags
+        if (fcntl (s, F_SETFL, opt) < 0) {
+            continue;
+        }
+
+        // an error occured in connect or select
+        if (res <= 0) {
             continue;
         }
 
@@ -157,7 +199,7 @@ connected_node_s connect_to_node(const char *node) {
     }
 
     if (info == NULL) {
-        log_error("Could not connect.\n");
+        log_error("Could not connect.");
         freeaddrinfo(result);
         return (connected_node_s){.s=-1};
     }
@@ -173,7 +215,14 @@ connected_node_s connect_to_node(const char *node) {
     struct sockaddr from;
     memset(&from, 0, sizeof(struct sockaddr));
     write_version_message(connected_node.s, *connected_node.addr, from);
+
     parsed_version_payload_s parsed = read_version_message(connected_node.s);
+    if(parsed.parsed_bytes == -1) {
+        log_error("Handshake failed.");
+        free_connected_node(connected_node);
+        return (connected_node_s){.s=-1};
+    }
+
     write_verack_message(connected_node.s);
     connected_node.version_payload = parsed.version_payload;
 
@@ -320,23 +369,39 @@ void *check_thread() {
         free(n->node);
         free(n);
 
-        if(conn.s != -1) {
+        if(conn.s == -1) {
             log_debug("Connection to node failed.");
+            sleep(1);
+            continue;
+        }
+
+        int seed_height;
+        char *seed_user_agent;
+        pthread_mutex_lock(&SEED_MUTEX);
+        {
+            seed_height = SEED_HEIGHT;
+            seed_user_agent = strdup(SEED_USER_AGENT);
+        }
+        pthread_mutex_unlock(&SEED_MUTEX);
+
+        int same_user_agent = strcmp(conn.version_payload.user_agent.string, seed_user_agent);
+        free(seed_user_agent);
+
+        if(same_user_agent != 0) {
+            log_debug("User agent doesn't match.");
+            sleep(1);
             continue;
         }
 
         // Add to GOOD_NODES if it passes, free for now.
-        if(conn.version_payload.start_height < SEED_HEIGHT) {
+        if(conn.version_payload.start_height < seed_height) {
             log_debug("Too few blocks.");
-            continue;
-        }
-
-        if(strcmp(conn.version_payload.user_agent.string, SEED_USER_AGENT) != 0) {
-            log_debug("User agent doesn't match.");
+            sleep(1);
             continue;
         }
 
         log_debug("Looks good!");
+        sleep(1);
     }
 
     log_trace("Exiting check_thread()");
