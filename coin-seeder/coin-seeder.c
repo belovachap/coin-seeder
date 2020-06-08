@@ -27,7 +27,7 @@ char *SEED_USER_AGENT = NULL;
 
 typedef struct coin_node {
     char *node;
-    int last_contact;
+    time_t last_contact;
     struct coin_node *next;
 } coin_node_s;
 
@@ -146,7 +146,7 @@ connected_node_s connect_to_node(const char *node) {
         return (connected_node_s){.s=-1};
     }
 
-    struct timeval timeout = {.tv_sec=5, .tv_usec=0};
+    struct timeval timeout = {.tv_sec=1, .tv_usec=0};
     socketfd s;
     struct addrinfo *info;
     for (info = result; info != NULL; info = info->ai_next) {
@@ -340,6 +340,24 @@ void *seed_thread() {
     return NULL;
 }
 
+void add_good_node(coin_node_s *n) {
+    log_trace("Entering add_good_node()");
+
+    n->last_contact = time(NULL);
+    pthread_mutex_lock(&GOOD_MUTEX);
+    {
+        n->next = GOOD_NODES;
+        GOOD_NODES = n;
+
+        for(coin_node_s *node = n; node != NULL; node = node->next) {
+            log_debug("Good node %s %d", node->node, node->last_contact);
+        }
+    }
+    pthread_mutex_unlock(&GOOD_MUTEX);
+
+    log_trace("Exit add_good_node()");
+}
+
 void *check_thread() {
     log_trace("Entering check_thread()");
 
@@ -366,12 +384,11 @@ void *check_thread() {
         log_debug("Checking node: %s...", n->node);
         // Connect to coin_node, check the version and block height.
         connected_node_s conn = connect_to_node(n->node);
-        free(n->node);
-        free(n);
 
         if(conn.s == -1) {
             log_debug("Connection to node failed.");
-            sleep(1);
+            free(n->node);
+            free(n);
             continue;
         }
 
@@ -389,19 +406,21 @@ void *check_thread() {
 
         if(same_user_agent != 0) {
             log_debug("User agent doesn't match.");
-            sleep(1);
+            free(n->node);
+            free(n);
             continue;
         }
 
         // Add to GOOD_NODES if it passes, free for now.
         if(conn.version_payload.start_height < seed_height) {
             log_debug("Too few blocks.");
-            sleep(1);
+            free(n->node);
+            free(n);
             continue;
         }
 
         log_debug("Looks good!");
-        sleep(1);
+        add_good_node(n);
     }
 
     log_trace("Exiting check_thread()");
@@ -435,9 +454,13 @@ int main (int argc, char *argv[])
     struct sigaction act = {.sa_handler=handle_control_c};
     sigaction(SIGINT, &act, NULL);
 
-    pthread_t check, seed, dns;
-    log_info("Starting check thread");
-    pthread_create(&check, NULL, &check_thread, NULL);
+    pthread_t check1, check2, seed, dns;
+
+    log_info("Starting check1 thread");
+    pthread_create(&check1, NULL, &check_thread, NULL);
+
+    log_info("Starting check2 thread");
+    pthread_create(&check2, NULL, &check_thread, NULL);
 
     log_info("Starting dns thread");
     pthread_create(&dns, NULL, &dns_thread, NULL);
@@ -446,8 +469,11 @@ int main (int argc, char *argv[])
     pthread_create(&seed, NULL, &seed_thread, NULL);
 
     void *_;
-    pthread_join(check, &_);
-    log_info("Check thread rejoined the main thread");
+    pthread_join(check1, &_);
+    log_info("Check1 thread rejoined the main thread");
+
+    pthread_join(check2, &_);
+    log_info("Check2 thread rejoined the main thread");
 
     pthread_join(dns, &_);
     log_info("Dns thread rejoined the main thread");
