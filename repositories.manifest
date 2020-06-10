@@ -8,4 +8,12 @@ summary: coin-seeder project repository
 
 :
 role: prerequisite
+location: https://github.com/belovachap/libcoin-seeder.git
+
+:
+role: prerequisite
+location: https://github.com/belovachap/libdns.git
+
+:
+role: prerequisite
 location: https://github.com/belovachap/liblog.git

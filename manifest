@@ -8,6 +8,6 @@ url: https://example.org/coin-seeder
 email: chapman.shoop@gmail.com
 depends: * build2 >= 0.12.0
 depends: * bpkg >= 0.12.0
+depends: libcoin-seeder ^0.1.0
+depends: libdns ^0.1.0
 depends: liblog ^0.1.0
-depends: libcoin-seeder
-depends: libdns
