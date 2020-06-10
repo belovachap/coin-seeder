@@ -428,13 +428,50 @@ void *check_thread() {
 }
 
 
+
+
+int get_good_ip_list(void *data, addr_t* addr, int max, int ipv4, int ipv6) {
+    int i = 0;
+    pthread_mutex_lock(&GOOD_MUTEX);
+    {
+        for(coin_node_s *node = GOOD_NODES; node != NULL; node = node->next) {
+            char *obuf = malloc(4);
+            int ret_val = inet_pton(AF_INET, node->node, obuf);
+            if (ret_val != 1) {
+                log_error("Unable to convert address '%s' to ip bytes.", node->node);
+                free(obuf);
+                continue;
+            }
+
+            i++;
+            if (i > max) {
+                break;
+            }
+
+            addr_t a = {.v=AF_INET, .data=*obuf};
+            addr[i-1] = a;
+        }
+    }
+    pthread_mutex_unlock(&GOOD_MUTEX);
+
+    return i-1;
+}
+
 void *dns_thread() {
     log_trace("Entering dns_thread()");
 
-    while(!QUIT) {
-        // Need to listen for incoming UDP requests and respond appropriately...
-        sleep(1);
-    }
+    dns_opt_t dns_opt = {
+        .port=53,
+        .datattl=60,
+        .nsttl=40000,
+        .host="dseed.peercoin-library.org",
+        .ns="dns.peercoin-library.org",
+        .mbox="",
+        .cb=get_good_ip_list,
+        .nRequests=0,
+    };
+
+    dnsserver(&dns_opt);
 
     log_trace("Exiting dns_thread()");
     return NULL;
@@ -475,9 +512,12 @@ int main (int argc, char *argv[])
     pthread_join(check2, &_);
     log_info("Check2 thread rejoined the main thread");
 
-    pthread_join(dns, &_);
-    log_info("Dns thread rejoined the main thread");
-
     pthread_join(seed, &_);
     log_info("Seed thread rejoined the main thread");
+
+    // The dns thread doesn't have a clean way to stop the dns server, so we
+    // cancel it after the other threads rejoin.
+    pthread_cancel(dns);
+    pthread_join(dns, &_);
+    log_info("Dns thread rejoined the main thread");
 }
